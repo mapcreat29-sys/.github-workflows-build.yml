@@ -1,0 +1,674 @@
+name: Build FireRec APK
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Create project files
+        run: |
+            cat > settings.gradle <<'FIREREC_EOF'
+            pluginManagement {
+                repositories { google(); mavenCentral(); gradlePluginPortal() }
+            }
+            dependencyResolutionManagement {
+                repositories { google(); mavenCentral() }
+            }
+            rootProject.name = "FireRec"
+            include ':app'
+            FIREREC_EOF
+            cat > build.gradle <<'FIREREC_EOF'
+            plugins { id 'com.android.application' version '8.2.2' apply false }
+            FIREREC_EOF
+            cat > gradle.properties <<'FIREREC_EOF'
+            org.gradle.jvmargs=-Xmx2g
+            android.useAndroidX=false
+            FIREREC_EOF
+            mkdir -p app
+            cat > app/build.gradle <<'FIREREC_EOF'
+            plugins { id 'com.android.application' }
+            android {
+                namespace 'com.firerec'
+                compileSdk 34
+                defaultConfig {
+                    applicationId "com.firerec"
+                    minSdk 29
+                    targetSdk 34
+                    versionCode 1
+                    versionName "1.0"
+                }
+                compileOptions {
+                    sourceCompatibility JavaVersion.VERSION_17
+                    targetCompatibility JavaVersion.VERSION_17
+                }
+            }
+            FIREREC_EOF
+            mkdir -p app/src/main
+            cat > app/src/main/AndroidManifest.xml <<'FIREREC_EOF'
+            <?xml version="1.0" encoding="utf-8"?>
+            <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+                <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+                <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+                <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+                <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+                <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+                <application android:label="FireRec" android:allowBackup="false"
+                    android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                    <activity android:name=".MainActivity" android:exported="true">
+                        <intent-filter>
+                            <action android:name="android.intent.action.MAIN"/>
+                            <category android:name="android.intent.category.LAUNCHER"/>
+                        </intent-filter>
+                    </activity>
+                    <service android:name=".RecorderService" android:exported="false"
+                        android:foregroundServiceType="mediaProjection|microphone"/>
+                </application>
+            </manifest>
+            FIREREC_EOF
+            mkdir -p app/src/main/java/com/firerec
+            cat > app/src/main/java/com/firerec/MainActivity.java <<'FIREREC_EOF'
+            package com.firerec;
+
+            import android.Manifest;
+            import android.app.Activity;
+            import android.content.Context;
+            import android.content.Intent;
+            import android.content.pm.PackageManager;
+            import android.graphics.Color;
+            import android.media.projection.MediaProjectionManager;
+            import android.os.Build;
+            import android.os.Bundle;
+            import android.view.Gravity;
+            import android.widget.ArrayAdapter;
+            import android.widget.Button;
+            import android.widget.CheckBox;
+            import android.widget.LinearLayout;
+            import android.widget.Spinner;
+            import android.widget.TextView;
+            import android.widget.Toast;
+            import java.util.ArrayList;
+
+            public class MainActivity extends Activity {
+                static final int REQ_CAP = 1, REQ_PERM = 2;
+                static final String[] RES = {"720p", "1080p (Full HD)", "2K (1440p)", "4K (2160p)"};
+                static final int[] RES_V = {720, 1080, 1440, 2160};
+                static final String[] FPS = {"30 FPS", "60 FPS", "90 FPS"};
+                static final int[] FPS_V = {30, 60, 90};
+                Spinner resSp, fpsSp;
+                CheckBox cbInt, cbMic;
+                Button btn;
+
+                TextView label(String t) {
+                    TextView v = new TextView(this);
+                    v.setText(t);
+                    v.setTextColor(Color.WHITE);
+                    v.setTextSize(16);
+                    v.setPadding(0, 40, 0, 8);
+                    return v;
+                }
+
+                @Override
+                protected void onCreate(Bundle b) {
+                    super.onCreate(b);
+                    LinearLayout root = new LinearLayout(this);
+                    root.setOrientation(LinearLayout.VERTICAL);
+                    root.setBackgroundColor(Color.rgb(18, 18, 24));
+                    root.setPadding(56, 96, 56, 56);
+
+                    TextView title = new TextView(this);
+                    title.setText("FireRec \uD83D\uDD25");
+                    title.setTextColor(Color.WHITE);
+                    title.setTextSize(30);
+                    title.setGravity(Gravity.CENTER);
+                    root.addView(title);
+
+                    root.addView(label("Resolution"));
+                    resSp = new Spinner(this);
+                    resSp.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, RES));
+                    resSp.setSelection(1);
+                    root.addView(resSp);
+
+                    root.addView(label("Frame rate"));
+                    fpsSp = new Spinner(this);
+                    fpsSp.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, FPS));
+                    fpsSp.setSelection(1);
+                    root.addView(fpsSp);
+
+                    cbInt = new CheckBox(this);
+                    cbInt.setText("Internal audio (game sound)");
+                    cbInt.setTextColor(Color.WHITE);
+                    cbInt.setChecked(true);
+                    root.addView(cbInt);
+                    cbMic = new CheckBox(this);
+                    cbMic.setText("Microphone");
+                    cbMic.setTextColor(Color.WHITE);
+                    cbMic.setChecked(true);
+                    root.addView(cbMic);
+
+                    btn = new Button(this);
+                    btn.setTextSize(18);
+                    btn.setOnClickListener(v -> onButton());
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT, 180);
+                    lp.topMargin = 80;
+                    root.addView(btn, lp);
+
+                    TextView note = new TextView(this);
+                    note.setText("Videos save in Movies/FireRec. Start, then open your game. Tap the notification to stop.");
+                    note.setTextColor(Color.LTGRAY);
+                    note.setPadding(0, 48, 0, 0);
+                    root.addView(note);
+
+                    setContentView(root);
+                }
+
+                @Override
+                protected void onResume() {
+                    super.onResume();
+                    btn.setText(RecorderService.running ? "STOP RECORDING" : "START RECORDING");
+                }
+
+                void onButton() {
+                    if (RecorderService.running) {
+                        startService(new Intent(this, RecorderService.class).setAction("STOP"));
+                        btn.setText("START RECORDING");
+                        return;
+                    }
+                    ArrayList<String> need = new ArrayList<>();
+                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                        need.add(Manifest.permission.RECORD_AUDIO);
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                        need.add(Manifest.permission.POST_NOTIFICATIONS);
+                    if (!need.isEmpty()) {
+                        requestPermissions(need.toArray(new String[0]), REQ_PERM);
+                    } else {
+                        launchCapture();
+                    }
+                }
+
+                @Override
+                public void onRequestPermissionsResult(int rc, String[] p, int[] r) {
+                    super.onRequestPermissionsResult(rc, p, r);
+                    launchCapture();
+                }
+
+                void launchCapture() {
+                    MediaProjectionManager m = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+                    startActivityForResult(m.createScreenCaptureIntent(), REQ_CAP);
+                }
+
+                @Override
+                protected void onActivityResult(int rc, int res, Intent data) {
+                    super.onActivityResult(rc, res, data);
+                    if (rc != REQ_CAP) return;
+                    if (res != RESULT_OK || data == null) {
+                        Toast.makeText(this, "Permission denied", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    Intent i = new Intent(this, RecorderService.class);
+                    i.putExtra("code", res);
+                    i.putExtra("data", data);
+                    i.putExtra("res", RES_V[resSp.getSelectedItemPosition()]);
+                    i.putExtra("fps", FPS_V[fpsSp.getSelectedItemPosition()]);
+                    i.putExtra("int", cbInt.isChecked());
+                    i.putExtra("mic", cbMic.isChecked());
+                    startForegroundService(i);
+                    btn.setText("STOP RECORDING");
+                    Toast.makeText(this, "Recording started - open your game", Toast.LENGTH_LONG).show();
+                    moveTaskToBack(true);
+                }
+            }
+            FIREREC_EOF
+            mkdir -p app/src/main/java/com/firerec
+            cat > app/src/main/java/com/firerec/RecorderService.java <<'FIREREC_EOF'
+            package com.firerec;
+
+            import android.app.Notification;
+            import android.app.NotificationChannel;
+            import android.app.NotificationManager;
+            import android.app.PendingIntent;
+            import android.app.Service;
+            import android.content.ContentValues;
+            import android.content.Intent;
+            import android.content.pm.PackageManager;
+            import android.content.pm.ServiceInfo;
+            import android.hardware.display.DisplayManager;
+            import android.hardware.display.VirtualDisplay;
+            import android.media.AudioAttributes;
+            import android.media.AudioFormat;
+            import android.media.AudioPlaybackCaptureConfiguration;
+            import android.media.AudioRecord;
+            import android.media.MediaCodec;
+            import android.media.MediaCodecInfo;
+            import android.media.MediaFormat;
+            import android.media.MediaMuxer;
+            import android.media.MediaRecorder;
+            import android.media.projection.MediaProjection;
+            import android.media.projection.MediaProjectionManager;
+            import android.net.Uri;
+            import android.os.Environment;
+            import android.os.Handler;
+            import android.os.IBinder;
+            import android.os.Looper;
+            import android.os.ParcelFileDescriptor;
+            import android.provider.MediaStore;
+            import android.util.DisplayMetrics;
+            import android.view.Display;
+            import android.view.Surface;
+            import android.widget.Toast;
+            import java.nio.ByteBuffer;
+            import java.nio.ByteOrder;
+            import java.text.SimpleDateFormat;
+            import java.util.ArrayList;
+            import java.util.Arrays;
+            import java.util.Date;
+            import java.util.Locale;
+
+            public class RecorderService extends Service {
+                static volatile boolean running = false;
+                static final String CH = "firerec";
+                static final int SR = 48000;
+
+                MediaProjection projection;
+                VirtualDisplay vd;
+                MediaCodec vEnc, aEnc;
+                MediaMuxer muxer;
+                AudioRecord recInt, recMic;
+                Thread audioThread, drainThread;
+                volatile boolean stopFlag = false;
+                boolean stopping = false;
+                boolean hasAudio = false;
+                ParcelFileDescriptor pfd;
+                Uri uri;
+                final Handler main = new Handler(Looper.getMainLooper());
+
+                // muxer state (drain thread only)
+                int vTrack = -1, aTrack = -1;
+                boolean muxStarted = false;
+                final ArrayList<Object[]> pending = new ArrayList<>();
+
+                @Override
+                public IBinder onBind(Intent i) {
+                    return null;
+                }
+
+                void toast(String s) {
+                    main.post(() -> Toast.makeText(getApplicationContext(), s, Toast.LENGTH_LONG).show());
+                }
+
+                @Override
+                public int onStartCommand(Intent i, int flags, int id) {
+                    if (i == null) {
+                        stopSelf();
+                        return START_NOT_STICKY;
+                    }
+                    if ("STOP".equals(i.getAction())) {
+                        if (running) stopRecording(); else stopSelf();
+                        return START_NOT_STICKY;
+                    }
+                    if (running) return START_NOT_STICKY;
+
+                    NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                    nm.createNotificationChannel(new NotificationChannel(CH, "Recording", NotificationManager.IMPORTANCE_LOW));
+                    Intent s = new Intent(this, RecorderService.class).setAction("STOP");
+                    PendingIntent pi = PendingIntent.getService(this, 0, s,
+                            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                    Notification n = new Notification.Builder(this, CH)
+                            .setContentTitle("FireRec")
+                            .setContentText("Recording... tap to stop")
+                            .setSmallIcon(android.R.drawable.presence_video_online)
+                            .setContentIntent(pi).build();
+                    boolean micOk = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                            == PackageManager.PERMISSION_GRANTED;
+                    int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                            | (micOk ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE : 0);
+                    startForeground(1, n, type);
+                    try {
+                        begin(i, micOk);
+                        running = true;
+                    } catch (Throwable e) {
+                        toast("Error: " + e.getMessage());
+                        releaseAll(false);
+                        running = false;
+                        stopForeground(true);
+                        stopSelf();
+                    }
+                    return START_NOT_STICKY;
+                }
+
+                int even(int v) {
+                    return v & ~1;
+                }
+
+                void begin(Intent i, boolean micOk) throws Exception {
+                    int code = i.getIntExtra("code", 0);
+                    Intent data = i.getParcelableExtra("data");
+                    int shortSide = i.getIntExtra("res", 1080);
+                    int fps = i.getIntExtra("fps", 60);
+                    boolean wantInt = i.getBooleanExtra("int", true) && micOk;
+                    boolean wantMic = i.getBooleanExtra("mic", true) && micOk;
+
+                    DisplayMetrics dm = new DisplayMetrics();
+                    Display disp = ((DisplayManager) getSystemService(DISPLAY_SERVICE)).getDisplay(Display.DEFAULT_DISPLAY);
+                    disp.getRealMetrics(dm);
+                    int nw = Math.max(dm.widthPixels, dm.heightPixels);
+                    int nh = Math.min(dm.widthPixels, dm.heightPixels);
+                    float sc = (float) shortSide / nh;
+                    int w = even(Math.round(nw * sc));
+                    int h = even(shortSide);
+
+                    long br = (long) (w * (double) h * fps * 0.12);
+                    br = Math.max(4_000_000L, Math.min(br, 60_000_000L));
+
+                    MediaFormat vf = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h);
+                    vf.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+                    vf.setInteger(MediaFormat.KEY_BIT_RATE, (int) br);
+                    vf.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
+                    vf.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+                    vf.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+                    vf.setInteger(MediaFormat.KEY_PRIORITY, 0);
+                    vf.setInteger(MediaFormat.KEY_OPERATING_RATE, fps);
+                    vf.setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh);
+
+                    vEnc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+                    try {
+                        vEnc.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                    } catch (Exception e) {
+                        vEnc.release();
+                        vf.removeKey(MediaFormat.KEY_PROFILE);
+                        vf.removeKey(MediaFormat.KEY_PRIORITY);
+                        vf.removeKey(MediaFormat.KEY_OPERATING_RATE);
+                        vEnc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+                        vEnc.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                    }
+                    Surface surf = vEnc.createInputSurface();
+                    vEnc.start();
+
+                    MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                    projection = mpm.getMediaProjection(code, data);
+                    projection.registerCallback(new MediaProjection.Callback() {
+                        @Override
+                        public void onStop() {
+                            main.post(() -> stopRecording());
+                        }
+                    }, main);
+
+                    // audio
+                    AudioFormat af = new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(SR)
+                            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO).build();
+                    int buf = Math.max(AudioRecord.getMinBufferSize(SR, AudioFormat.CHANNEL_IN_STEREO,
+                            AudioFormat.ENCODING_PCM_16BIT) * 2, 32768);
+                    if (wantInt) {
+                        try {
+                            AudioPlaybackCaptureConfiguration cfg = new AudioPlaybackCaptureConfiguration.Builder(projection)
+                                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN).build();
+                            recInt = new AudioRecord.Builder().setAudioFormat(af).setBufferSizeInBytes(buf)
+                                    .setAudioPlaybackCaptureConfig(cfg).build();
+                            if (recInt.getState() != AudioRecord.STATE_INITIALIZED) {
+                                recInt.release();
+                                recInt = null;
+                            }
+                        } catch (Exception e) {
+                            recInt = null;
+                        }
+                    }
+                    if (wantMic) {
+                        try {
+                            recMic = new AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.MIC)
+                                    .setAudioFormat(af).setBufferSizeInBytes(buf).build();
+                            if (recMic.getState() != AudioRecord.STATE_INITIALIZED) {
+                                recMic.release();
+                                recMic = null;
+                            }
+                        } catch (Exception e) {
+                            recMic = null;
+                        }
+                    }
+                    hasAudio = recInt != null || recMic != null;
+                    if (hasAudio) {
+                        MediaFormat afm = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SR, 2);
+                        afm.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
+                        afm.setInteger(MediaFormat.KEY_BIT_RATE, 192000);
+                        afm.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 65536);
+                        aEnc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
+                        aEnc.configure(afm, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                        aEnc.start();
+                    }
+
+                    // output file
+                    String name = "FireRec_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".mp4";
+                    ContentValues cv = new ContentValues();
+                    cv.put(MediaStore.Video.Media.DISPLAY_NAME, name);
+                    cv.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+                    cv.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/FireRec");
+                    cv.put(MediaStore.Video.Media.IS_PENDING, 1);
+                    uri = getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv);
+                    pfd = getContentResolver().openFileDescriptor(uri, "rw");
+                    muxer = new MediaMuxer(pfd.getFileDescriptor(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+
+                    vd = projection.createVirtualDisplay("FireRec", w, h, dm.densityDpi,
+                            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surf, null, null);
+
+                    stopFlag = false;
+                    if (hasAudio) {
+                        audioThread = new Thread(this::audioLoop, "fr-audio");
+                        audioThread.start();
+                    }
+                    drainThread = new Thread(this::drainLoop, "fr-drain");
+                    drainThread.start();
+                }
+
+                void audioLoop() {
+                    final int N = 2048; // shorts per chunk = 1024 stereo frames
+                    short[] a = new short[N];
+                    short[] b = new short[N];
+                    byte[] bytes = new byte[N * 2];
+                    long samples = 0;
+                    try {
+                        if (recInt != null) recInt.startRecording();
+                        if (recMic != null) recMic.startRecording();
+                        while (!stopFlag) {
+                            if (recInt != null) {
+                                int n = recInt.read(a, 0, N, AudioRecord.READ_BLOCKING);
+                                if (n < N) Arrays.fill(a, Math.max(n, 0), N, (short) 0);
+                            }
+                            if (recMic != null) {
+                                int n = recMic.read(b, 0, N, AudioRecord.READ_BLOCKING);
+                                if (n < N) Arrays.fill(b, Math.max(n, 0), N, (short) 0);
+                            }
+                            ByteBuffer bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+                            for (int k = 0; k < N; k++) {
+                                int s = 0;
+                                if (recInt != null) s += a[k];
+                                if (recMic != null) s += b[k];
+                                if (s > 32767) s = 32767;
+                                if (s < -32768) s = -32768;
+                                bb.putShort((short) s);
+                            }
+                            int idx = -1;
+                            while (idx < 0 && !stopFlag) idx = aEnc.dequeueInputBuffer(20000);
+                            if (idx < 0) break;
+                            ByteBuffer in = aEnc.getInputBuffer(idx);
+                            in.clear();
+                            in.put(bytes, 0, N * 2);
+                            aEnc.queueInputBuffer(idx, 0, N * 2, samples * 1000000L / SR, 0);
+                            samples += N / 2;
+                        }
+                    } catch (Throwable e) {
+                        // fall through to EOS
+                    }
+                    try {
+                        int idx = aEnc.dequeueInputBuffer(200000);
+                        if (idx >= 0) {
+                            aEnc.queueInputBuffer(idx, 0, 0, samples * 1000000L / SR, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                        }
+                    } catch (Throwable e) {
+                    }
+                }
+
+                void write(boolean video, ByteBuffer d, MediaCodec.BufferInfo info) {
+                    int track = video ? vTrack : aTrack;
+                    d.position(info.offset);
+                    d.limit(info.offset + info.size);
+                    if (muxStarted) {
+                        muxer.writeSampleData(track, d, info);
+                    } else {
+                        ByteBuffer c = ByteBuffer.allocate(info.size);
+                        c.put(d);
+                        c.flip();
+                        MediaCodec.BufferInfo ni = new MediaCodec.BufferInfo();
+                        ni.set(0, info.size, info.presentationTimeUs, info.flags);
+                        pending.add(new Object[]{track, c, ni});
+                    }
+                }
+
+                void maybeStartMuxer() {
+                    if (muxStarted) return;
+                    if (vTrack < 0 || (hasAudio && aTrack < 0)) return;
+                    muxer.start();
+                    muxStarted = true;
+                    for (Object[] p : pending) {
+                        muxer.writeSampleData((Integer) p[0], (ByteBuffer) p[1], (MediaCodec.BufferInfo) p[2]);
+                    }
+                    pending.clear();
+                }
+
+                void drainLoop() {
+                    MediaCodec.BufferInfo vi = new MediaCodec.BufferInfo();
+                    MediaCodec.BufferInfo ai = new MediaCodec.BufferInfo();
+                    boolean vDone = false, aDone = !hasAudio, eosSent = false;
+                    long vBase = -1;
+                    try {
+                        while (!(vDone && aDone)) {
+                            if (stopFlag && !eosSent) {
+                                vEnc.signalEndOfInputStream();
+                                eosSent = true;
+                            }
+                            boolean idle = true;
+                            if (!vDone) {
+                                int o = vEnc.dequeueOutputBuffer(vi, 0);
+                                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                                    vTrack = muxer.addTrack(vEnc.getOutputFormat());
+                                    maybeStartMuxer();
+                                    idle = false;
+                                } else if (o >= 0) {
+                                    idle = false;
+                                    ByteBuffer d = vEnc.getOutputBuffer(o);
+                                    if ((vi.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) vi.size = 0;
+                                    if (vi.size > 0) {
+                                        if (vBase < 0) vBase = vi.presentationTimeUs;
+                                        vi.presentationTimeUs -= vBase;
+                                        write(true, d, vi);
+                                    }
+                                    if ((vi.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) vDone = true;
+                                    vEnc.releaseOutputBuffer(o, false);
+                                }
+                            }
+                            if (!aDone) {
+                                int o = aEnc.dequeueOutputBuffer(ai, 0);
+                                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                                    aTrack = muxer.addTrack(aEnc.getOutputFormat());
+                                    maybeStartMuxer();
+                                    idle = false;
+                                } else if (o >= 0) {
+                                    idle = false;
+                                    ByteBuffer d = aEnc.getOutputBuffer(o);
+                                    if ((ai.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) ai.size = 0;
+                                    if (ai.size > 0) write(false, d, ai);
+                                    if ((ai.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) aDone = true;
+                                    aEnc.releaseOutputBuffer(o, false);
+                                }
+                            }
+                            if (idle) Thread.sleep(2);
+                        }
+                    } catch (Throwable e) {
+                        toast("Recording error: " + e.getMessage());
+                    }
+                    boolean ok = muxStarted;
+                    releaseAll(ok);
+                    running = false;
+                    main.post(() -> {
+                        if (ok) toast("Saved in Movies/FireRec");
+                        stopForeground(true);
+                        stopSelf();
+                    });
+                }
+
+                void stopRecording() {
+                    if (stopping) return;
+                    stopping = true;
+                    stopFlag = true;
+                    try {
+                        if (vd != null) vd.release();
+                    } catch (Throwable e) {
+                    }
+                    if (drainThread == null) { // never fully started
+                        releaseAll(false);
+                        running = false;
+                        stopForeground(true);
+                        stopSelf();
+                    }
+                }
+
+                void releaseAll(boolean keepFile) {
+                    stopFlag = true;
+                    try {
+                        if (audioThread != null) audioThread.join(2000);
+                    } catch (Throwable e) {
+                    }
+                    try { if (vd != null) vd.release(); } catch (Throwable e) { }
+                    try { if (projection != null) projection.stop(); } catch (Throwable e) { }
+                    try { if (recInt != null) { recInt.stop(); recInt.release(); } } catch (Throwable e) { }
+                    try { if (recMic != null) { recMic.stop(); recMic.release(); } } catch (Throwable e) { }
+                    try { if (vEnc != null) { vEnc.stop(); vEnc.release(); } } catch (Throwable e) { }
+                    try { if (aEnc != null) { aEnc.stop(); aEnc.release(); } } catch (Throwable e) { }
+                    try { if (muxer != null) { if (muxStarted) muxer.stop(); muxer.release(); } } catch (Throwable e) { keepFile = false; }
+                    try { if (pfd != null) pfd.close(); } catch (Throwable e) { }
+                    try {
+                        if (uri != null) {
+                            if (keepFile) {
+                                ContentValues cv = new ContentValues();
+                                cv.put(MediaStore.Video.Media.IS_PENDING, 0);
+                                getContentResolver().update(uri, cv, null, null);
+                            } else {
+                                getContentResolver().delete(uri, null, null);
+                            }
+                        }
+                    } catch (Throwable e) {
+                    }
+                }
+
+                @Override
+                public void onDestroy() {
+                    running = false;
+                    super.onDestroy();
+                }
+            }
+            FIREREC_EOF
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.5
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FireRec-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v${{ github.run_number }}" app/build/outputs/apk/debug/app-debug.apk --title "FireRec v${{ github.run_number }}" --notes "Debug APK - download app-debug.apk and install"
